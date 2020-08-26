@@ -1,95 +1,239 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
 Description: AppSync Lambda Resolvers
-Outputs:
-  ProdDataEndpoint:
-    Description: API Prod stage endpoint
-    Value:
-      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/
 Parameters:
   IAMUsername:
-    Default: sysadmin
     Description: Username of the IAM user for this service
     Type: String
+    Default: sysadmin
+  ParamCertificateArn:
+    Description: Domain Certificate Arn
+    Type: String
+  ParamCustomDomainName:
+    Description: Custom Domain Name
+    Type: String
+  ParamHostedZoneId:
+    Description: Hosted Zone ID
+    Type: String
+  ParamKMSKeyID:
+    Description: KMS key id
+    Type: String
+  ParamProjectName:
+    Description: Project name
+    Type: String
 Resources:
-  Lambda:
+  RestApi:
+    Type: AWS::Serverless::Api
+    DeletionPolicy: Delete
+    DependsOn: Lambda
     Properties:
-      CodeUri: s3://gdps-fs-sum-dwnld/lambda/11b281ab6263c1113c2cc698484dcdec
-      Environment:
-        Variables:
-          Stage: prod
-      Events:
-        Create:
-          Properties:
-            Method: post
-            Path: /report
-          Type: Api
-        Ping:
-          Properties:
-            Method: get
-            Path: /report
-          Type: Api
+      StageName: Prod
+      EndpointConfiguration: REGIONAL
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn:
+              Fn::GetAtt:
+              - AuthLambda
+              - Arn
+            Identity:
+              ReauthorizeEvery: 1
+      GatewayResponses:
+        UNAUTHORIZED:
+          StatusCode: 401
+          ResponseTemplates:
+            application/json: '{ "message": $context.error.messageString }'
+          ResponseParameters:
+            Headers:
+              Access-Control-Expose-Headers: "'WWW-Authenticate'"
+              Access-Control-Allow-Origin: "'*'"
+              Access-Control-Allow-Headers: "'*'"
+      Domain:
+        DomainName:
+          Ref: ParamCustomDomainName
+        CertificateArn:
+          Ref: ParamCertificateArn
+        EndpointConfiguration: REGIONAL
+        Route53:
+          HostedZoneId:
+            Ref: ParamHostedZoneId
+          EvaluateTargetHealth: true
+          DistributionDomainName:
+            Value:
+              Fn::Sub: https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/
+  Lambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: go1.x
+      CodeUri: s3://gdps-lambdas/fs-sum-dwnld/609d645a947cf62f3876c120222f3378
       Handler: /report
       Role:
         Fn::GetAtt:
         - LambdaRole
         - Arn
-      Runtime: go1.x
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          Stage: prod
       Tags:
         BillTo: Gales
-      Timeout: 10
+      Events:
+        Ping:
+          Type: Api
+          Properties:
+            Path: /report
+            Method: GET
+            RestApiId:
+              Ref: RestApi
+            Auth:
+              Authorizer: NONE
+        Create:
+          Type: Api
+          Properties:
+            Path: /report
+            Method: POST
+            RestApiId:
+              Ref: RestApi
+            Auth:
+              Authorizer: LambdaTokenAuthorizer
+  AuthLambda:
     Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://gdps-lambdas/fs-sum-dwnld/609d645a947cf62f3876c120222f3378
+      Handler: /authorizer
+      Runtime: go1.x
+      Role:
+        Fn::GetAtt:
+        - AuthLambdaRole
+        - Arn
+      Timeout: 10
+      MemorySize: 256
+      Tags:
+        BillTo: Gales
   LambdaRole:
+    Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
+        Version: 2012-10-17
         Statement:
-        - Action:
-          - sts:AssumeRole
-          Effect: Allow
+        - Effect: Allow
           Principal:
             Service:
             - lambda.amazonaws.com
-        Version: 2012-10-17
+          Action:
+          - sts:AssumeRole
       Policies:
-      - PolicyDocument:
-          Statement:
-          - Action:
-            - ssm:GetParametersByPath
-            Effect: Allow
-            Resource:
-              Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prod/gdps-fs-sum-dwnld*
+      - PolicyName: FunctionParameterAccess
+        PolicyDocument:
           Version: '2012-10-17'
-        PolicyName: FunctionParameterAccess
-      - PolicyDocument:
           Statement:
-          - Action:
+          - Effect: Allow
+            Action:
+            - ssm:GetParametersByPath
+            Resource:
+              Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prod/${ParamProjectName}*
+      - PolicyName: FunctionKMS
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - kms:Decrypt
+            - kms:DescribeKey
+            Resource:
+              Fn::Sub: arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${ParamKMSKeyID}
+      - PolicyName: FunctionLogAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
             - logs:CreateLogGroup
             - logs:CreateLogStream
             - logs:PutLogEvents
-            Effect: Allow
             Resource: '*'
+      - PolicyName: FunctionXRayAccess
+        PolicyDocument:
           Version: '2012-10-17'
-        PolicyName: FunctionLogAccess
-      - PolicyDocument:
           Statement:
-          - Action:
+          - Effect: Allow
+            Action:
             - xray:PutTraceSegments
             - xray:PutTelemetryRecords
-            Effect: Allow
             Resource: '*'
+      - PolicyName: FunctionS3Access
+        PolicyDocument:
           Version: '2012-10-17'
-        PolicyName: FunctionXRayAccess
-      - PolicyDocument:
           Statement:
-          - Action:
+          - Effect: Allow
+            Action:
             - s3:*
-            Effect: Allow
-            Resource: arn:aws:s3:::gdps-fs-sum-dwnld/reports/*
-          Version: '2012-10-17'
-        PolicyName: FunctionS3Access
+            Resource:
+              Fn::Sub: arn:aws:s3:::${ParamProjectName}/reports/*
+  AuthLambdaRole:
     Type: AWS::IAM::Role
-  ServerlessRestApi:
-    DeletionPolicy: Retain
     Properties:
-      StageName: Prod
-    Type: AWS::Serverless::Api
-Transform: AWS::Serverless-2016-10-31
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: FunctionParameterAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ssm:GetParametersByPath
+            Resource:
+              Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/prod/${ParamProjectName}*
+      - PolicyName: FunctionKMS
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - kms:Decrypt
+            - kms:DescribeKey
+            Resource:
+              Fn::Sub: arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${ParamKMSKeyID}
+      - PolicyName: FunctionLogAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+Outputs:
+  ApiId:
+    Description: API ID
+    Value:
+      Ref: RestApi
+  ApiEndpoint:
+    Description: API Prod stage endpoint
+    Value:
+      Fn::Sub: https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/
+  ApiArn:
+    Description: API ARN
+    Value:
+      Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/
+  FQDN:
+    Description: Domain Name
+    Value:
+      Ref: ParamCustomDomainName
+  LambdaArn:
+    Description: Lambda ARN
+    Value:
+      Fn::GetAtt:
+      - Lambda
+      - Arn
